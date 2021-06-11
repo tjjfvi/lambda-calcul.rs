@@ -1,163 +1,239 @@
+use rand::random;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::convert::TryInto;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 static STDLIB: &'static str = include_str!("./stdlib");
 
-#[derive(Eq)]
-pub enum Expr {
-  Identifier(String),
-  Lambda(String, Box<Expr>),
-  Call(Box<Expr>, Box<Expr>),
+#[derive(Debug)]
+pub struct WrappedExpr(Rc<RefCell<Expr>>);
+
+impl WrappedExpr {
+  pub fn wrap_data(data: ExprData) -> WrappedExpr {
+    WrappedExpr(Rc::new(RefCell::new(Expr {
+      data,
+      cloned_value: None,
+    })))
+  }
+  pub fn wrap(expr: Expr) -> WrappedExpr {
+    WrappedExpr(Rc::new(RefCell::new(expr)))
+  }
 }
 
-thread_local!(static CURRENT_REDUCING_EXPRS: RefCell<HashSet<Expr>> = RefCell::new(HashSet::new()));
+#[derive(Debug)]
+pub struct Expr {
+  data: ExprData,
+  cloned_value: Option<(u32, WrappedExpr)>,
+}
 
-impl Expr {
-  pub fn reduce(self, full: bool) -> Expr {
-    CURRENT_REDUCING_EXPRS.with(|cre_cell| {
-      {
-        let mut current_reducing_exprs = cre_cell.borrow_mut();
-        println!("{} {}", current_reducing_exprs.len(), self);
-        if current_reducing_exprs.contains(&self) {
-          println!("dejavu");
-          return self.clone();
+#[derive(Debug)]
+pub enum ExprData {
+  Placeholder(u32),
+  Wrapper(WrappedExpr),
+  Lambda(WrappedExpr, WrappedExpr),
+  Call(WrappedExpr, WrappedExpr),
+}
+
+impl WrappedExpr {
+  pub fn reduce(&mut self) {
+    self._reduce(&mut HashSet::new(), 0, 0)
+  }
+  fn _reduce(&mut self, current_reducing_hashes: &mut HashSet<u64>, num: u32, s: u32) {
+    let spaces = String::from_utf8(vec![b' '; s.try_into().unwrap()]).unwrap();
+    println!("{}reduce {}", spaces, self._compute_format(num));
+    loop {
+      let old_hash = self._compute_hash(num);
+      let mut force_continue = false;
+      if current_reducing_hashes.contains(&old_hash) {
+        println!("{}recursive, abort", spaces);
+        break;
+      }
+      current_reducing_hashes.insert(old_hash);
+      let rc = {
+        let expr = self.0.borrow();
+        match &expr.data {
+          ExprData::Placeholder(_) => Some(None),
+          _ => None,
         }
-        current_reducing_exprs.insert(self.clone());
       }
-      let result = match self.clone() {
-        Expr::Identifier(id) => Expr::Identifier(id),
-        Expr::Lambda(arg, body) => Expr::Lambda(arg, Box::new(body.reduce(full))),
-        Expr::Call(fun, arg) => match *fun {
-          Expr::Lambda(name, body) => {
-            let bound = body.bind(name, arg);
-            if full {
-              bound.reduce(full)
+      .unwrap_or_else(|| {
+        let mut expr = self.0.borrow_mut();
+        match &mut expr.data {
+          ExprData::Placeholder(_) => panic!("Unreachable"),
+          ExprData::Wrapper(inner) => {
+            force_continue = true;
+            Some(Rc::clone(&inner.0))
+          }
+          ExprData::Lambda(_, x) => {
+            x._reduce(current_reducing_hashes, num + 1, s + 1);
+            None
+          }
+          ExprData::Call(fun_w, arg_w) => {
+            let fun_w_clone: WrappedExpr;
+            fun_w._reduce(current_reducing_hashes, num, s + 1);
+            let fun = if Rc::strong_count(&fun_w.0) != 1 {
+              fun_w_clone = fun_w.clone();
+              fun_w_clone.0.borrow()
             } else {
-              bound
-            }
-          }
-          _ => {
-            let same = fun == arg;
-            let new_fun = fun.reduce(false);
-            match new_fun.clone() {
-              Expr::Lambda(name, body) => {
-                let bound = body.bind(name, if same { Box::new(new_fun) } else { arg });
-                if full {
-                  bound.reduce(full)
-                } else {
-                  bound
+              fun_w.0.borrow()
+            };
+            match &fun.data {
+              ExprData::Lambda(param_w, body_w) => {
+                {
+                  let param = param_w.0.borrow();
+                  if !matches!(param.data, ExprData::Placeholder(_)) {
+                    panic!("Lambda expression has non-placeholder parameter")
+                  }
                 }
+                *param_w.0.borrow_mut() = Expr {
+                  data: ExprData::Wrapper(WrappedExpr(Rc::clone(&arg_w.0))),
+                  cloned_value: None,
+                };
+                Some(Rc::clone(&body_w.0))
               }
-              new_fun2 => Expr::Call(Box::new(new_fun2.reduce(true)), Box::new(arg.reduce(true))),
+              ExprData::Wrapper(_) => panic!("Unreachable"),
+              _ => {
+                arg_w._reduce(current_reducing_hashes, num, s + 1);
+                None
+              }
             }
           }
-        },
-      };
-      {
-        let mut current_reducing_exprs = cre_cell.borrow_mut();
-        current_reducing_exprs.remove(&self);
+        }
+      });
+      current_reducing_hashes.remove(&old_hash);
+      match rc {
+        Some(x) => {
+          self.0 = x;
+          let new_hash = self._compute_hash(num);
+          if old_hash == new_hash && !force_continue {
+            break;
+          }
+          println!("{}reduced to {}", spaces, self._compute_format(num));
+        }
+        _ => break,
       }
-      result
+    }
+    println!("{}end reduce {}", spaces, self._compute_format(num));
+  }
+  pub fn _clone(&self, id: u32, clone_placeholder: bool) -> WrappedExpr {
+    {
+      let expr = self.0.borrow();
+      match &expr.data {
+        ExprData::Wrapper(val) => Some(val._clone(id, clone_placeholder)),
+        _ => match &expr.cloned_value {
+          Some((id2, val)) if id == *id2 => Some(WrappedExpr(Rc::clone(&val.0))),
+          _ => match &expr.data {
+            ExprData::Placeholder(_) if !clone_placeholder => Some(WrappedExpr(Rc::clone(&self.0))),
+            _ => None,
+          },
+        },
+      }
+    }
+    .unwrap_or_else(|| {
+      let mut expr = self.0.borrow_mut();
+      let cloned_expr = Expr {
+        data: match &expr.data {
+          ExprData::Wrapper(_) => panic!("Unreachable"),
+          ExprData::Placeholder(x) => ExprData::Placeholder(*x),
+          ExprData::Lambda(a, b) => ExprData::Lambda(a._clone(id, true), b._clone(id, false)),
+          ExprData::Call(a, b) => ExprData::Call(a._clone(id, false), b._clone(id, false)),
+        },
+        cloned_value: None,
+      };
+      let clone = WrappedExpr(Rc::new(RefCell::new(cloned_expr)));
+      expr.cloned_value = Some((id, WrappedExpr(Rc::clone(&clone.0))));
+      clone
     })
   }
-  pub fn bind(&self, name: String, value: Box<Expr>) -> Expr {
-    match self {
-      Expr::Identifier(id) => {
-        if *id == name {
-          *value
-        } else {
-          Expr::Identifier(id.clone())
-        }
+  fn _fmt(&self, f: &mut fmt::Formatter<'_>, num: u32, parens: bool) -> fmt::Result {
+    let expr = self.0.borrow();
+    match &expr.data {
+      ExprData::Placeholder(id) => write!(f, "{}", id),
+      ExprData::Wrapper(val) => val._fmt(f, num, parens),
+      ExprData::Call(fun, arg) => {
+        fun._fmt(f, num, true)?;
+        write!(f, "(")?;
+        arg._fmt(f, num, false)?;
+        write!(f, ")")?;
+        Ok(())
       }
-      Expr::Call(fun, arg) => Expr::Call(
-        Box::new(fun.bind(name.clone(), value.clone())),
-        Box::new(arg.bind(name, value)),
-      ),
-      Expr::Lambda(arg, body) => {
-        if value.uses(&arg[..]) {
-          let new_arg = arg.clone() + "'";
-          let body = Box::new(body.bind(arg.clone(), Box::new(Expr::Identifier(new_arg.clone()))));
-          Expr::Lambda(new_arg, body).bind(name, value)
-        } else {
-          Expr::Lambda(arg.clone(), Box::new(body.bind(name, value)))
+      ExprData::Lambda(arg, body) => {
+        {
+          let mut arg_expr = arg.0.borrow_mut();
+          if !matches!(arg_expr.data, ExprData::Placeholder(_)) {
+            panic!("Lambda expression has non-placeholder parameter")
+          }
+          arg_expr.data = ExprData::Placeholder(num);
+          if parens {
+            write!(f, "(")?;
+          }
+          write!(f, "{} => ", num)?;
         }
+        body._fmt(f, num + 1, false)?;
+        if parens {
+          write!(f, ")")?;
+        }
+        Ok(())
       }
     }
   }
-  pub fn uses(&self, name: &str) -> bool {
-    match self {
-      Expr::Identifier(id) => *id == name,
-      Expr::Call(fun, arg) => fun.uses(name) || arg.uses(name),
-      Expr::Lambda(arg, body) => *arg != name && body.uses(name),
-    }
+  fn _compute_format<'a>(&'a self, num: u32) -> NumberedWrappedExpr<'a> {
+    NumberedWrappedExpr(num, self)
   }
-  pub fn _hash<H: Hasher>(&self, state: &mut H, num: u32) {
-    match self {
-      Expr::Identifier(id) => {
-        (0).hash(state);
-        id.hash(state);
+  fn _compute_hash(&self, num: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    self._hash(&mut hasher, num);
+    hasher.finish()
+  }
+  fn _hash<H: Hasher>(&self, hasher: &mut H, num: u32) {
+    let expr = self.0.borrow();
+    match &expr.data {
+      ExprData::Placeholder(id) => {
+        (0).hash(hasher);
+        (id).hash(hasher);
       }
-      Expr::Call(fun, arg) => {
-        (1).hash(state);
-        fun._hash(state, num);
-        arg._hash(state, num);
+      ExprData::Wrapper(val) => {
+        val._hash(hasher, num);
       }
-      Expr::Lambda(arg, body) => {
-        let new_arg = num.to_string();
-        (2).hash(state);
-        new_arg.hash(state);
-        let new_body = body.bind(arg.clone(), Box::new(Expr::Identifier(new_arg)));
-        new_body._hash(state, num);
+      ExprData::Call(fun, arg) => {
+        (1).hash(hasher);
+        fun._hash(hasher, num);
+        arg._hash(hasher, num);
+      }
+      ExprData::Lambda(arg, body) => {
+        (2).hash(hasher);
+        {
+          let mut arg_expr = arg.0.borrow_mut();
+          if !matches!(arg_expr.data, ExprData::Placeholder(_)) {
+            panic!("Lambda expression has non-placeholder parameter")
+          }
+          arg_expr.data = ExprData::Placeholder(num);
+          num.hash(hasher)
+        }
+        body._hash(hasher, num + 1);
       }
     }
   }
 }
 
-impl fmt::Display for Expr {
+impl Clone for WrappedExpr {
+  fn clone(&self) -> WrappedExpr {
+    self._clone(random(), false)
+  }
+}
+
+impl Hash for WrappedExpr {
+  fn hash<H: Hasher>(&self, hasher: &mut H) {
+    self._hash(hasher, 0)
+  }
+}
+
+impl fmt::Display for WrappedExpr {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Expr::Identifier(id) => write!(f, "{}", id),
-      Expr::Call(fun, arg) => match &**fun {
-        Expr::Lambda(name, body) => write!(f, "({} => {})({})", name, body, arg),
-        _ => write!(f, "{}({})", fun, arg),
-      },
-      Expr::Lambda(arg, body) => write!(f, "{} => {}", arg, body),
-    }
-  }
-}
-
-impl Hash for Expr {
-  fn hash<H: Hasher>(&self, state: &mut H) {
-    self._hash(state, 0)
-  }
-}
-
-impl Clone for Expr {
-  fn clone(&self) -> Expr {
-    match self {
-      Expr::Identifier(id) => Expr::Identifier(id.clone()),
-      Expr::Call(fun, arg) => Expr::Call(fun.clone(), arg.clone()),
-      Expr::Lambda(arg, body) => Expr::Lambda(arg.clone(), body.clone()),
-    }
-  }
-}
-
-impl PartialEq for Expr {
-  fn eq(&self, other: &Expr) -> bool {
-    match (self, other) {
-      (Expr::Identifier(id1), Expr::Identifier(id2)) => id1 == id2,
-      (Expr::Call(fun1, arg1), Expr::Call(fun2, arg2)) => fun1 == fun2 && arg1 == arg2,
-      (Expr::Lambda(arg1, body1), Expr::Lambda(arg2, body2)) if arg1 == arg2 => body1 == body2,
-      (Expr::Lambda(arg1, body1), Expr::Lambda(arg2, body2)) => {
-        **body1
-          == body2
-            .clone()
-            .bind(arg2.clone(), Box::new(Expr::Identifier(arg1.clone())))
-      }
-      _ => false,
-    }
+    self._fmt(f, 0, false)
   }
 }
 
@@ -214,33 +290,56 @@ fn lex(input: &String) -> Result<Vec<Token>, String> {
   Ok(result)
 }
 
-fn _parse(tokens: &Vec<Token>, index: usize) -> Result<(Expr, usize), String> {
+fn _parse<'a>(
+  tokens: &'a Vec<Token>,
+  index: usize,
+  scope: &mut HashMap<&'a str, WrappedExpr>,
+) -> Result<(WrappedExpr, usize), String> {
   let result = match tokens.get(index) {
     Some(token) => match token {
       Token::OpenParen => {
-        _parse(tokens, index + 1).and_then(|(expr, index)| match tokens.get(index) {
+        _parse(tokens, index + 1, scope).and_then(|(expr, index)| match tokens.get(index) {
           Some(Token::CloseParen) => Ok((expr, index + 1)),
           _ => Err(format!("Expected ')' at position {}", index)),
         })
       }
       Token::Identifier(id) => match tokens.get(index + 1) {
-        Some(Token::Arrow) => _parse(tokens, index + 2)
-          .and_then(|(expr, index)| Ok((Expr::Lambda(id.clone(), Box::new(expr)), index))),
+        Some(Token::Arrow) => {
+          let arg = WrappedExpr::wrap_data(ExprData::Placeholder(u32::MAX));
+          let old = scope
+            .get(&id[..])
+            .and_then(|x| Some(WrappedExpr(Rc::clone(&x.0))));
+          scope.insert(id, WrappedExpr(Rc::clone(&arg.0)));
+          let result = _parse(tokens, index + 2, scope).and_then(|(expr, index)| {
+            Ok((WrappedExpr::wrap_data(ExprData::Lambda(arg, expr)), index))
+          });
+          match old {
+            Some(x) => scope.insert(id, WrappedExpr(Rc::clone(&x.0))),
+            None => scope.remove(&id[..]),
+          };
+          result
+        }
         Some(Token::Equal) => {
-          _parse(tokens, index + 2).and_then(|(val, index)| match tokens.get(index) {
-            Some(Token::Semicolon) => _parse(tokens, index + 1).and_then(|(body, index)| {
-              Ok((
-                Expr::Call(
-                  Box::new(Expr::Lambda(id.clone(), Box::new(body))),
-                  Box::new(val),
-                ),
-                index,
-              ))
-            }),
+          _parse(tokens, index + 2, scope).and_then(|(val, index)| match tokens.get(index) {
+            Some(Token::Semicolon) => {
+              let old = scope
+                .get(&id[..])
+                .and_then(|x| Some(WrappedExpr(Rc::clone(&x.0))));
+              scope.insert(id, WrappedExpr(Rc::clone(&val.0)));
+              let result = _parse(tokens, index + 1, scope);
+              match old {
+                Some(x) => scope.insert(id, WrappedExpr(Rc::clone(&x.0))),
+                None => scope.remove(&id[..]),
+              };
+              result
+            }
             _ => Err(format!("Expected ';' at position {}", index)),
           })
         }
-        _ => Ok((Expr::Identifier(id.clone()), index + 1)),
+        _ => match scope.get(&id[..]) {
+          Some(expr) => Ok((WrappedExpr(Rc::clone(&expr.0)), index + 1)),
+          None => Err(format!("Unbound identifier {}", id)),
+        },
       },
       _ => Err(format!("Unexpected token at position {}", index)),
     },
@@ -249,16 +348,17 @@ fn _parse(tokens: &Vec<Token>, index: usize) -> Result<(Expr, usize), String> {
   match result {
     Ok((mut expr, mut index)) => {
       while let Some(Token::OpenParen) = tokens.get(index) {
-        let tup = match _parse(tokens, index + 1).and_then(|(arg, index)| match tokens.get(index) {
-          Some(Token::CloseParen) => {
-            let val = Expr::Call(Box::new(expr), Box::new(arg));
-            Ok((val, index + 1))
-          }
-          _ => Err(format!("Expected ')' at position {}", index)),
-        }) {
-          Ok(x) => x,
-          x => return x,
-        };
+        let tup =
+          match _parse(tokens, index + 1, scope).and_then(|(arg, index)| match tokens.get(index) {
+            Some(Token::CloseParen) => {
+              let val = WrappedExpr::wrap_data(ExprData::Call(expr, arg));
+              Ok((val, index + 1))
+            }
+            _ => Err(format!("Expected ')' at position {}", index)),
+          }) {
+            Ok(x) => x,
+            x => return x,
+          };
         expr = tup.0;
         index = tup.1;
       }
@@ -268,12 +368,12 @@ fn _parse(tokens: &Vec<Token>, index: usize) -> Result<(Expr, usize), String> {
   }
 }
 
-fn parse(source: String) -> Result<Expr, String> {
+fn parse(source: String) -> Result<WrappedExpr, String> {
   let tokens = match lex(&source) {
     Ok(x) => x,
     Err(x) => return Err(x),
   };
-  let (expr, index) = match _parse(&tokens, 0) {
+  let (expr, index) = match _parse(&tokens, 0, &mut HashMap::new()) {
     Ok(x) => x,
     Err(x) => return Err(x),
   };
@@ -291,8 +391,19 @@ fn is_word_char(char: char) -> bool {
 }
 
 fn main() {
-  let input = String::from(STDLIB) + "y(f => x => num.is0(x)(end)(_ => f(num.dec(x))))(2)";
+  let input = String::from(STDLIB) + "y(f => x => num.isnt0(x)(identity)(_ => f(num.dec(x))))(2)";
+  // + "y(f => x => num.is0(x)(end)(_ => f(num.dec(x))))(2)";
   // let input = String::from("(x => (y => x => y(x))(x))");
-  let expr = parse(input).expect("");
-  println!("{}", expr.reduce(true));
+  let mut expr = parse(input).expect("");
+  println!("{}", expr);
+  expr.reduce();
+  println!("{}", expr);
+}
+
+struct NumberedWrappedExpr<'a>(u32, &'a WrappedExpr);
+
+impl<'a> fmt::Display for NumberedWrappedExpr<'a> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.1._fmt(f, self.0, false)
+  }
 }

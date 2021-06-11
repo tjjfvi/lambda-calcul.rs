@@ -1,5 +1,5 @@
 
-y = f => f((g => f(x => g(g)(x)))(g => f(x => g(g)(x))));
+y = f => (x => x(x))(g => f(g(g)));
 _ = y(_ => __ => _);
 compose = f => g => x => f(g(x));
 pipe = x => f => f(x);
@@ -7,7 +7,7 @@ identity = x => x;
 
 true = t => f => t;
 false = t => f => f;
-cond = t => f => x(t)(f);
+cond = t => f => x => x(t)(f);
 not = cond(false)(true);
 and = cond(identity)(_ => false);
 or = cond(_ => true)(identity);
@@ -22,8 +22,8 @@ rel.or = a => b => x => y => or(a(x)(y))(b(x)(y));
 
 num.inc = a => i => z => i(a(i)(z));
 num.dec = a => i => z => a(v => j => j(v(i)))(_ => z)(identity);
-num.add = a => a(inc);
-num.sub = a => a(dec);
+num.add = a => a(num.inc);
+num.sub = a => a(num.dec);
 0 = i => z => z;
 1 = identity;
 2 = num.inc(1);
@@ -35,13 +35,13 @@ num.sub = a => a(dec);
 8 = num.inc(7);
 9 = num.inc(8);
 10 = num.inc(9);
-100 = mult(10)(10);
-num.mult = a => b => a(add(b))(0);
-num.exp = a => b => a(mult(b))(1);
+num.mult = a => b => a(num.add(b))(0);
+num.exp = a => b => a(num.mult(b))(1);
+100 = num.mult(10)(10);
 num.is0 = a => a(_ => false)(true);
 num.isnt0 = pred.not(num.is0);
-num.gt = b => a => isnt0(sub(a)(b));
-num.lt = b => a => isnt0(sub(b)(a));
+num.gt = b => a => num.isnt0(num.sub(a)(b));
+num.lt = b => a => num.isnt0(num.sub(b)(a));
 num.eq = rel.not(rel.or(num.gt)(num.lt));
 num.gte = rel.not(num.lt);
 num.lte = rel.not(num.gt);
@@ -50,9 +50,9 @@ num.factorial = y(_factorial => n => num.is0(n)(_ => 1)(_ => num.mult(n)(_factor
 
 arr.empty = ne => e => e;
 arr.prepend = h => t => ne => e => ne(h)(t);
-arr.map = fn => y(_map => arr => arr(h => t => prepend(fn(h))(_map(t)))(arr.empty));
+arr.map = fn => y(_map => arr => arr(h => t => arr.prepend(fn(h))(_map(t)))(arr.empty));
 arr.reduce = fn => y(_reduce => acc => arr => arr(h => t => _reduce(fn(acc)(h))(t))(acc));
-arr.concat = y(_concat => a => b => a(h => t => prepend(h)(_concat(t)(b)))(b));
+arr.concat = y(_concat => a => b => a(h => t => arr.prepend(h)(_concat(t)(b)))(b));
 arr.flat = arr.reduce(arr.concat)(arr.empty);
 arr.some = arr.reduce(or)(false);
 arr.all = arr.reduce(and)(true);
