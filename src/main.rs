@@ -1,7 +1,7 @@
 use rand::random;
 use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
-use std::convert::TryInto;
+// use std::convert::TryInto;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -42,16 +42,16 @@ impl WrappedExpr {
     self._reduce(&mut HashSet::new(), 0, 0)
   }
   fn _reduce(&mut self, current_reducing_hashes: &mut HashSet<u64>, num: u32, s: u32) {
-    let spaces = String::from_utf8(vec![b' '; s.try_into().unwrap()]).unwrap();
-    println!("{}reduce {}", spaces, self._compute_format(num));
+    // let spaces = String::from_utf8(vec![b' '; s.try_into().unwrap()]).unwrap();
+    // println!("{}reduce {}", spaces, self._compute_format(num));
     loop {
       let old_hash = self._compute_hash(num);
       let mut force_continue = false;
-      if current_reducing_hashes.contains(&old_hash) {
-        println!("{}recursive, abort", spaces);
-        break;
-      }
-      current_reducing_hashes.insert(old_hash);
+      // if current_reducing_hashes.contains(&old_hash) {
+      //   println!("{}recursive, abort", "");
+      //   break;
+      // }
+      // current_reducing_hashes.insert(old_hash);
       let rc = {
         let expr = self.0.borrow();
         match &expr.data {
@@ -71,52 +71,78 @@ impl WrappedExpr {
             x._reduce(current_reducing_hashes, num + 1, s + 1);
             None
           }
-          ExprData::Call(fun_w, arg_w) => {
-            let fun_w_clone: WrappedExpr;
-            fun_w._reduce(current_reducing_hashes, num, s + 1);
-            let fun = if Rc::strong_count(&fun_w.0) != 1 {
-              fun_w_clone = fun_w.clone();
-              fun_w_clone.0.borrow()
-            } else {
-              fun_w.0.borrow()
-            };
-            match &fun.data {
-              ExprData::Lambda(param_w, body_w) => {
-                {
-                  let param = param_w.0.borrow();
-                  if !matches!(param.data, ExprData::Placeholder(_)) {
-                    panic!("Lambda expression has non-placeholder parameter")
+          ExprData::Call(fun, arg) => {
+            let mut fun = WrappedExpr(Rc::clone(&fun.0));
+            let mut args = vec![WrappedExpr(Rc::clone(&arg.0))];
+            loop {
+              fun = {
+                let fun_expr = fun.0.borrow();
+                match &fun_expr.data {
+                  ExprData::Wrapper(val) => WrappedExpr(Rc::clone(&val.0)),
+                  ExprData::Call(fun, arg) => {
+                    args.push(WrappedExpr(Rc::clone(&arg.0)));
+                    WrappedExpr(Rc::clone(&fun.0))
                   }
+                  ExprData::Lambda(param, body) => match args.pop() {
+                    Some(arg) => {
+                      {
+                        let param_expr = param.0.borrow();
+                        if !matches!(param_expr.data, ExprData::Placeholder(_)) {
+                          panic!("Lambda expression has non-placeholder parameter")
+                        }
+                      }
+                      if Rc::strong_count(&fun.0) > 1 {
+                        let id = random::<u32>();
+                        {
+                          let mut param_expr = param.0.borrow_mut();
+                          param_expr.cloned_value = Some((id, WrappedExpr(Rc::clone(&arg.0))));
+                        }
+                        body._clone(id, false)
+                      } else {
+                        *param.0.borrow_mut() = Expr {
+                          data: ExprData::Wrapper(WrappedExpr(Rc::clone(&arg.0))),
+                          cloned_value: None,
+                        };
+                        WrappedExpr(Rc::clone(&body.0))
+                      }
+                    }
+                    None => break,
+                  },
+                  _ => break,
                 }
-                *param_w.0.borrow_mut() = Expr {
-                  data: ExprData::Wrapper(WrappedExpr(Rc::clone(&arg_w.0))),
-                  cloned_value: None,
-                };
-                Some(Rc::clone(&body_w.0))
-              }
-              ExprData::Wrapper(_) => panic!("Unreachable"),
-              _ => {
-                arg_w._reduce(current_reducing_hashes, num, s + 1);
-                None
               }
             }
+            Some({
+              let mut expr = fun;
+              loop {
+                match args.pop() {
+                  Some(mut arg) => {
+                    arg.reduce();
+                    expr = WrappedExpr::wrap_data(ExprData::Call(expr, arg))
+                  }
+                  None => break,
+                }
+              }
+              expr.0
+            })
           }
         }
       });
-      current_reducing_hashes.remove(&old_hash);
+      // current_reducing_hashes.remove(&old_hash);
       match rc {
         Some(x) => {
           self.0 = x;
           let new_hash = self._compute_hash(num);
           if old_hash == new_hash && !force_continue {
+            println!("Identity {}", self._compute_format(num));
             break;
           }
-          println!("{}reduced to {}", spaces, self._compute_format(num));
+          // println!("{}reduced to {}", spaces, self._compute_format(num));
         }
         _ => break,
       }
     }
-    println!("{}end reduce {}", spaces, self._compute_format(num));
+    // println!("{}end reduce {}", spaces, self._compute_format(num));
   }
   pub fn _clone(&self, id: u32, clone_placeholder: bool) -> WrappedExpr {
     {
@@ -195,9 +221,7 @@ impl WrappedExpr {
         (0).hash(hasher);
         (id).hash(hasher);
       }
-      ExprData::Wrapper(val) => {
-        val._hash(hasher, num);
-      }
+      ExprData::Wrapper(val) => val._hash(hasher, num),
       ExprData::Call(fun, arg) => {
         (1).hash(hasher);
         fun._hash(hasher, num);
@@ -391,7 +415,8 @@ fn is_word_char(char: char) -> bool {
 }
 
 fn main() {
-  let input = String::from(STDLIB) + "y(f => x => num.isnt0(x)(identity)(_ => f(num.dec(x))))(2)";
+  let input = String::from(STDLIB) + "num.factorial(5)";
+  // + "y(f => x => num.is0(x)(identity)(_ => f(num.dec(x))))(5)";
   // + "y(f => x => num.is0(x)(end)(_ => f(num.dec(x))))(2)";
   // let input = String::from("(x => (y => x => y(x))(x))");
   let mut expr = parse(input).expect("");
