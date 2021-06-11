@@ -22,7 +22,7 @@ rel.or = a => b => x => y => or(a(x)(y))(b(x)(y));
 
 num.inc = a => i => z => i(a(i)(z));
 num.dec = a => i => z => a(v => j => j(v(i)))(_ => z)(identity);
-num.add = a => a(num.inc);
+num.add = a => b => i => z => a(i)(b(i)(z));
 num.sub = a => a(num.dec);
 0 = i => z => z;
 1 = identity;
@@ -35,7 +35,7 @@ num.sub = a => a(num.dec);
 8 = num.inc(7);
 9 = num.inc(8);
 10 = num.inc(9);
-num.mult = a => b => a(num.add(b))(0);
+num.mult = a => b => i => z => a(b(i))(z);
 num.exp = a => b => a(num.mult(b))(1);
 100 = num.mult(10)(10);
 num.is0 = a => a(_ => false)(true);

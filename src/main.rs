@@ -1,6 +1,6 @@
 use rand::random;
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap};
 // use std::convert::TryInto;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -39,36 +39,17 @@ pub enum ExprData {
 
 impl WrappedExpr {
   pub fn reduce(&mut self) {
-    self._reduce(&mut HashSet::new(), 0, 0)
-  }
-  fn _reduce(&mut self, current_reducing_hashes: &mut HashSet<u64>, num: u32, s: u32) {
-    // let spaces = String::from_utf8(vec![b' '; s.try_into().unwrap()]).unwrap();
-    // println!("{}reduce {}", spaces, self._compute_format(num));
-    loop {
-      let old_hash = self._compute_hash(num);
-      let mut force_continue = false;
-      // if current_reducing_hashes.contains(&old_hash) {
-      //   println!("{}recursive, abort", "");
-      //   break;
-      // }
-      // current_reducing_hashes.insert(old_hash);
+    {
       let rc = {
-        let expr = self.0.borrow();
-        match &expr.data {
-          ExprData::Placeholder(_) => Some(None),
-          _ => None,
-        }
-      }
-      .unwrap_or_else(|| {
         let mut expr = self.0.borrow_mut();
         match &mut expr.data {
-          ExprData::Placeholder(_) => panic!("Unreachable"),
+          ExprData::Placeholder(_) => None, //panic!("Unreachable"),
           ExprData::Wrapper(inner) => {
-            force_continue = true;
+            inner.reduce();
             Some(Rc::clone(&inner.0))
           }
-          ExprData::Lambda(_, x) => {
-            x._reduce(current_reducing_hashes, num + 1, s + 1);
+          ExprData::Lambda(_, body) => {
+            body.reduce();
             None
           }
           ExprData::Call(fun, arg) => {
@@ -114,6 +95,7 @@ impl WrappedExpr {
             }
             Some({
               let mut expr = fun;
+              expr.reduce();
               loop {
                 match args.pop() {
                   Some(mut arg) => {
@@ -127,22 +109,14 @@ impl WrappedExpr {
             })
           }
         }
-      });
-      // current_reducing_hashes.remove(&old_hash);
+      };
       match rc {
         Some(x) => {
           self.0 = x;
-          let new_hash = self._compute_hash(num);
-          if old_hash == new_hash && !force_continue {
-            println!("Identity {}", self._compute_format(num));
-            break;
-          }
-          // println!("{}reduced to {}", spaces, self._compute_format(num));
         }
-        _ => break,
+        _ => {}
       }
     }
-    // println!("{}end reduce {}", spaces, self._compute_format(num));
   }
   pub fn _clone(&self, id: u32, clone_placeholder: bool) -> WrappedExpr {
     {
@@ -415,10 +389,7 @@ fn is_word_char(char: char) -> bool {
 }
 
 fn main() {
-  let input = String::from(STDLIB) + "num.factorial(5)";
-  // + "y(f => x => num.is0(x)(identity)(_ => f(num.dec(x))))(5)";
-  // + "y(f => x => num.is0(x)(end)(_ => f(num.dec(x))))(2)";
-  // let input = String::from("(x => (y => x => y(x))(x))");
+  let input = String::from(STDLIB) + "num.factorial(6)";
   let mut expr = parse(input).expect("");
   println!("{}", expr);
   expr.reduce();
