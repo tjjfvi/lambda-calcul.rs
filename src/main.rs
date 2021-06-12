@@ -1,10 +1,10 @@
 use rand::random;
 use std::cell::RefCell;
 use std::collections::HashMap;
-// use std::convert::TryInto;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::time::Instant;
 
 static STDLIB: &'static str = include_str!("./stdlib");
 
@@ -359,8 +359,11 @@ fn main() {
   let input = String::from(STDLIB) + "num.factorial(5)";
   let mut expr = parse(input).expect("");
   println!("{}", expr);
+  let start = Instant::now();
   expr.reduce();
+  let duration = start.elapsed();
   println!("{}", expr);
+  println!("{:?}", duration)
 }
 
 struct NumberedWrappedExpr<'a>(u32, &'a WrappedExpr);
