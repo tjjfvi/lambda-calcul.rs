@@ -46,7 +46,7 @@ num.eq = rel.not(rel.or(num.gt)(num.lt));
 num.gte = rel.not(num.lt);
 num.lte = rel.not(num.gt);
 num.neq = rel.not(num.eq);
-num.factorial = y(_factorial => n => num.is0(n)(_ => 1)(_ => num.mult(n)(_factorial(num.dec(n))))(_));
+num.factorial = y(_factorial => n => num.is0(n)(1)(num.mult(n)(_factorial(num.dec(n)))));
 
 arr.empty = ne => e => e;
 arr.prepend = h => t => ne => e => ne(h)(t);

@@ -1,6 +1,6 @@
 use rand::random;
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::HashMap;
 // use std::convert::TryInto;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -39,84 +39,56 @@ pub enum ExprData {
 
 impl WrappedExpr {
   pub fn reduce(&mut self) {
-    {
-      let rc = {
-        let mut expr = self.0.borrow_mut();
-        match &mut expr.data {
-          ExprData::Placeholder(_) => None, //panic!("Unreachable"),
-          ExprData::Wrapper(inner) => {
-            inner.reduce();
-            Some(Rc::clone(&inner.0))
-          }
-          ExprData::Lambda(_, body) => {
-            body.reduce();
-            None
-          }
+    self._reduce(0)
+  }
+  fn _reduce(&mut self, num: u32) {
+    let mut current = WrappedExpr(Rc::clone(&self.0));
+    let mut calls: Vec<WrappedExpr> = vec![];
+    loop {
+      current = {
+        let mut current_expr = current.0.borrow_mut();
+        match &mut current_expr.data {
           ExprData::Call(fun, arg) => {
-            let mut fun = WrappedExpr(Rc::clone(&fun.0));
-            let mut args = vec![WrappedExpr(Rc::clone(&arg.0))];
-            loop {
-              fun = {
-                let fun_expr = fun.0.borrow();
-                match &fun_expr.data {
-                  ExprData::Wrapper(val) => WrappedExpr(Rc::clone(&val.0)),
-                  ExprData::Call(fun, arg) => {
-                    args.push(WrappedExpr(Rc::clone(&arg.0)));
-                    WrappedExpr(Rc::clone(&fun.0))
-                  }
-                  ExprData::Lambda(param, body) => match args.pop() {
-                    Some(arg) => {
-                      {
-                        let param_expr = param.0.borrow();
-                        if !matches!(param_expr.data, ExprData::Placeholder(_)) {
-                          panic!("Lambda expression has non-placeholder parameter")
-                        }
-                      }
-                      if Rc::strong_count(&fun.0) > 1 {
-                        let id = random::<u32>();
-                        {
-                          let mut param_expr = param.0.borrow_mut();
-                          param_expr.cloned_value = Some((id, WrappedExpr(Rc::clone(&arg.0))));
-                        }
-                        body._clone(id, false)
-                      } else {
-                        *param.0.borrow_mut() = Expr {
-                          data: ExprData::Wrapper(WrappedExpr(Rc::clone(&arg.0))),
-                          cloned_value: None,
-                        };
-                        WrappedExpr(Rc::clone(&body.0))
-                      }
-                    }
-                    None => break,
-                  },
-                  _ => break,
+            calls.push(WrappedExpr(Rc::clone(&arg.0)));
+            WrappedExpr(Rc::clone(&fun.0))
+          }
+          ExprData::Placeholder(_) => break,
+          ExprData::Wrapper(val) => WrappedExpr(Rc::clone(&val.0)),
+          ExprData::Lambda(param, body) => match calls.pop() {
+            Some(arg) => {
+              if Rc::strong_count(&current.0) > 1 {
+                let id = random::<u32>();
+                {
+                  let mut param_expr = param.0.borrow_mut();
+                  param_expr.cloned_value = Some((id, WrappedExpr(Rc::clone(&arg.0))));
                 }
+                body._clone(id, false)
+              } else {
+                *param.0.borrow_mut() = Expr {
+                  data: ExprData::Wrapper(WrappedExpr(Rc::clone(&arg.0))),
+                  cloned_value: None,
+                };
+                WrappedExpr(Rc::clone(&body.0))
               }
             }
-            Some({
-              let mut expr = fun;
-              expr.reduce();
-              loop {
-                match args.pop() {
-                  Some(mut arg) => {
-                    arg.reduce();
-                    expr = WrappedExpr::wrap_data(ExprData::Call(expr, arg))
-                  }
-                  None => break,
-                }
-              }
-              expr.0
-            })
-          }
+            None => {
+              body._reduce(num + 1);
+              break;
+            }
+          },
         }
-      };
-      match rc {
-        Some(x) => {
-          self.0 = x;
-        }
-        _ => {}
       }
     }
+    loop {
+      match calls.pop() {
+        Some(mut arg) => {
+          arg.reduce();
+          current = WrappedExpr::wrap_data(ExprData::Call(current, arg))
+        }
+        None => break,
+      }
+    }
+    self.0 = current.0
   }
   pub fn _clone(&self, id: u32, clone_placeholder: bool) -> WrappedExpr {
     {
@@ -182,11 +154,6 @@ impl WrappedExpr {
   }
   fn _compute_format<'a>(&'a self, num: u32) -> NumberedWrappedExpr<'a> {
     NumberedWrappedExpr(num, self)
-  }
-  fn _compute_hash(&self, num: u32) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    self._hash(&mut hasher, num);
-    hasher.finish()
   }
   fn _hash<H: Hasher>(&self, hasher: &mut H, num: u32) {
     let expr = self.0.borrow();
@@ -389,7 +356,7 @@ fn is_word_char(char: char) -> bool {
 }
 
 fn main() {
-  let input = String::from(STDLIB) + "num.factorial(6)";
+  let input = String::from(STDLIB) + "num.factorial(5)";
   let mut expr = parse(input).expect("");
   println!("{}", expr);
   expr.reduce();
