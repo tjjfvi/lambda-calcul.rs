@@ -84,7 +84,7 @@ impl WrappedExpr {
     loop {
       match calls.pop() {
         Some(mut arg) => {
-          arg.reduce();
+          arg._reduce(num);
           current = WrappedExpr::wrap_data(ExprData::Call(current, arg))
         }
         None => break,
