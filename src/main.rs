@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::Instant;
 
 static STDLIB: &'static str = include_str!("./stdlib");
@@ -26,7 +26,7 @@ impl WrappedExpr {
 #[derive(Debug)]
 pub struct Expr {
   data: ExprData,
-  cloned_value: Option<(u32, WrappedExpr)>,
+  cloned_value: Option<(u32, Weak<RefCell<Expr>>)>,
 }
 
 #[derive(Debug)]
@@ -60,9 +60,11 @@ impl WrappedExpr {
                 let id = random::<u32>();
                 {
                   let mut param_expr = param.0.borrow_mut();
-                  param_expr.cloned_value = Some((id, WrappedExpr(Rc::clone(&arg.0))));
+                  param_expr.cloned_value = Some((id, Rc::downgrade(&arg.0)));
                 }
-                body._clone(id, false)
+                body
+                  ._clone(id, false)
+                  .unwrap_or(WrappedExpr(Rc::clone(&body.0)))
               } else {
                 *param.0.borrow_mut() = Expr {
                   data: ExprData::Wrapper(WrappedExpr(Rc::clone(&arg.0))),
@@ -90,35 +92,46 @@ impl WrappedExpr {
     }
     self.0 = current.0
   }
-  pub fn _clone(&self, id: u32, clone_placeholder: bool) -> WrappedExpr {
+  pub fn _clone(&self, id: u32, clone_placeholder: bool) -> Option<WrappedExpr> {
     {
       let expr = self.0.borrow();
-      match &expr.data {
-        ExprData::Wrapper(val) => Some(val._clone(id, clone_placeholder)),
-        _ => match &expr.cloned_value {
-          Some((id2, val)) if id == *id2 => Some(WrappedExpr(Rc::clone(&val.0))),
-          _ => match &expr.data {
-            ExprData::Placeholder(_) if !clone_placeholder => Some(WrappedExpr(Rc::clone(&self.0))),
-            _ => None,
-          },
-        },
+      if let ExprData::Wrapper(val) = &expr.data {
+        return val._clone(id, clone_placeholder);
+      }
+      if let Some((id2, val)) = &expr.cloned_value {
+        if id == *id2 {
+          if let Some(val) = val.upgrade() {
+            return Some(WrappedExpr(Rc::clone(&val)));
+          }
+        }
+      }
+      if matches!(&expr.data, ExprData::Placeholder(_)) && !clone_placeholder {
+        return None;
       }
     }
-    .unwrap_or_else(|| {
-      let mut expr = self.0.borrow_mut();
-      let cloned_expr = Expr {
-        data: match &expr.data {
-          ExprData::Wrapper(_) => panic!("Unreachable"),
-          ExprData::Placeholder(x) => ExprData::Placeholder(*x),
-          ExprData::Lambda(a, b) => ExprData::Lambda(a._clone(id, true), b._clone(id, false)),
-          ExprData::Call(a, b) => ExprData::Call(a._clone(id, false), b._clone(id, false)),
+    let mut expr = self.0.borrow_mut();
+    let cloned_expr = Expr {
+      data: match &expr.data {
+        ExprData::Wrapper(_) => panic!("Unreachable"),
+        ExprData::Placeholder(x) => Some(ExprData::Placeholder(*x)),
+        ExprData::Lambda(a, b) => match (a._clone(id, true), b._clone(id, false)) {
+          (_, None) => None,
+          (None, _) => panic!("Unreachable"),
+          (Some(a), Some(b)) => Some(ExprData::Lambda(a, b)),
         },
-        cloned_value: None,
-      };
-      let clone = WrappedExpr(Rc::new(RefCell::new(cloned_expr)));
-      expr.cloned_value = Some((id, WrappedExpr(Rc::clone(&clone.0))));
-      clone
-    })
+        ExprData::Call(a, b) => match (a._clone(id, false), b._clone(id, false)) {
+          (None, None) => None,
+          (a2, b2) => Some(ExprData::Call(
+            a2.unwrap_or(WrappedExpr(Rc::clone(&a.0))),
+            b2.unwrap_or(WrappedExpr(Rc::clone(&b.0))),
+          )),
+        },
+      }?,
+      cloned_value: None,
+    };
+    let clone = WrappedExpr(Rc::new(RefCell::new(cloned_expr)));
+    expr.cloned_value = Some((id, Rc::downgrade(&clone.0)));
+    Some(clone)
   }
   fn _fmt(&self, f: &mut fmt::Formatter<'_>, num: u32, parens: bool) -> fmt::Result {
     let expr = self.0.borrow();
@@ -181,12 +194,6 @@ impl WrappedExpr {
         body._hash(hasher, num + 1);
       }
     }
-  }
-}
-
-impl Clone for WrappedExpr {
-  fn clone(&self) -> WrappedExpr {
-    self._clone(random(), false)
   }
 }
 
@@ -356,7 +363,7 @@ fn is_word_char(char: char) -> bool {
 }
 
 fn main() {
-  let input = String::from(STDLIB) + "num.factorial(5)";
+  let input = String::from(STDLIB) + "num.factorial(6)";
   let mut expr = parse(input).expect("");
   println!("{}", expr);
   let start = Instant::now();
